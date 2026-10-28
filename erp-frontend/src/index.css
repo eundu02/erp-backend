@@ -1,0 +1,18 @@
+body {
+  margin: 0;
+  background: #f5f7fa;
+}
+
+.clickable-row {
+  cursor: pointer;
+}
+
+.qty-plus {
+  color: #389e0d;
+  font-weight: 600;
+}
+
+.qty-minus {
+  color: #cf1322;
+  font-weight: 600;
+}
