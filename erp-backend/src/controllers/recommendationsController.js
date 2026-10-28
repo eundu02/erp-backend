@@ -4,11 +4,15 @@ const withTransaction = require('../db/transaction');
 const httpError = require('../utils/httpError');
 const { BOOTSTRAP_ITERATIONS, bootstrapDemand, orderQuantity } = require('../services/forecast');
 
-const HISTORY_DAYS = 28;      // 수요 집계 기간: 어제까지 최근 28일 (오늘은 집계가 끝나지 않아 제외)
+// 수요 집계 기간: 어제까지 max(28일, 보호기간 × 2)일 (오늘은 집계가 끝나지 않아 제외).
+// 이력 충분 기준(보호기간 × 2, 최소 14일)과 조회 기간을 일치시켜, 보호기간이 긴 상품도
+// 이력이 실제로 쌓여 있으면 '이력 충분'으로 판정되게 한다.
+const BASE_HISTORY_DAYS = 28;
+const MAX_HISTORY_DAYS = 365; // 비정상적으로 긴 보호기간에 대한 안전 상한
 const MIN_REQUIRED_DAYS = 14; // 이력 충분 기준: max(보호기간 × 2, 14일)
 const MIN_LEAD_TIME_SAMPLES = 3; // 공급업체 실적 납기 사용 기준: 확정 입고 3건 이상
 const MODEL_NAME = 'rule_based';
-const MODEL_VERSION = 'v1-bootstrap28-lt';
+const MODEL_VERSION = 'v1.1-bootstrap-lt-window';
 const STRATEGIES = ['p50', 'p70', 'p90'];
 
 // 'YYYY-MM-DD' 날짜 연산 (UTC 기준으로 계산해 시간대 영향 제거)
@@ -136,17 +140,28 @@ async function calculate(req, res) {
       if (missing.length) throw httpError(404, `상품을 찾을 수 없습니다. (product_id=${missing.join(', ')})`);
     }
 
-    const { rows: w } = await client.query(
-      `SELECT (CURRENT_DATE - $1::int)::text AS start, (CURRENT_DATE - 1)::text AS "end"`,
-      [HISTORY_DAYS]
-    );
-    const windowStart = w[0].start;
+    const { rows: w } = await client.query(`SELECT (CURRENT_DATE - 1)::text AS "end"`);
     const windowEnd = w[0].end;
-    const { byProduct, firstSale } = await loadSalesHistory(
-      client, products.map((p) => p.product_id), windowStart, windowEnd
-    );
     const supplierStats = await loadSupplierLeadTimes(
       client, [...new Set(products.map((p) => p.supplier_id).filter((v) => v !== null))]
+    );
+
+    // 상품별 적용 납기·보호기간·조회 기간을 먼저 정한다 (조회 기간이 보호기간에 따라 달라지므로)
+    const plan = new Map();
+    for (const p of products) {
+      if (!p.is_active || p.supplier_id === null) continue;
+      const leadTime = resolveLeadTime(p, supplierStats);
+      const protectionDays = leadTime.applied_days + p.review_period_days;
+      const requiredDays = Math.max(protectionDays * 2, MIN_REQUIRED_DAYS);
+      const windowDays = Math.min(Math.max(BASE_HISTORY_DAYS, requiredDays), MAX_HISTORY_DAYS);
+      plan.set(p.product_id, {
+        leadTime, protectionDays, requiredDays, windowDays,
+        windowStart: addDays(windowEnd, -(windowDays - 1)),
+      });
+    }
+    const earliest = [...plan.values()].reduce((m, x) => (x.windowStart < m ? x.windowStart : m), windowEnd);
+    const { byProduct, firstSale } = await loadSalesHistory(
+      client, products.map((p) => p.product_id), earliest, windowEnd
     );
 
     const created = [];
@@ -164,7 +179,11 @@ async function calculate(req, res) {
         continue;
       }
 
-      const sales = byProduct[p.product_id] ?? {};
+      const { leadTime, protectionDays, requiredDays, windowDays, windowStart } = plan.get(p.product_id);
+      // 이 상품의 조회 기간 안의 판매만 사용 (전체 조회는 가장 긴 기간 기준으로 한 번에 가져옴)
+      const sales = Object.fromEntries(
+        Object.entries(byProduct[p.product_id] ?? {}).filter(([d]) => d >= windowStart)
+      );
       const inventoryPosition = p.on_hand_qty + p.outstanding_po_qty;
 
       // 수요 집계 기간 안에 확정 판매가 한 건도 없으면 예측 불가 → 스냅샷을 저장하지 않고 안전재고만 안내
@@ -172,7 +191,7 @@ async function calculate(req, res) {
         notForecastable.push({
           ...base,
           status: '예측 불가',
-          reason: `최근 ${HISTORY_DAYS}일(${windowStart} ~ ${windowEnd}) 확정 판매 이력 없음`,
+          reason: `최근 ${windowDays}일(${windowStart} ~ ${windowEnd}) 확정 판매 이력 없음`,
           safety_stock_qty: p.safety_stock_qty,
           on_hand_qty: p.on_hand_qty,
           outstanding_po_qty: p.outstanding_po_qty,
@@ -185,10 +204,7 @@ async function calculate(req, res) {
       const availableDays = daysBetween(availableStart, windowEnd) + 1;
       const dailyDemand = Array.from({ length: availableDays }, (_, i) => sales[addDays(availableStart, i)] ?? 0);
 
-      const leadTime = resolveLeadTime(p, supplierStats);
       const appliedLeadTime = leadTime.applied_days;
-      const protectionDays = appliedLeadTime + p.review_period_days;
-      const requiredDays = Math.max(protectionDays * 2, MIN_REQUIRED_DAYS);
 
       const seed = crypto.randomInt(0, 2 ** 31 - 1);
       const demand = bootstrapDemand(dailyDemand, protectionDays, seed);
@@ -205,7 +221,7 @@ async function calculate(req, res) {
       }
 
       const detail = {
-        history_window: { start: windowStart, end: windowEnd, days: HISTORY_DAYS },
+        history_window: { start: windowStart, end: windowEnd, days: windowDays, rule: 'max(28일, 보호기간×2)' },
         available_start: availableStart,
         available_days: availableDays,
         required_days: requiredDays,

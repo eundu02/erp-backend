@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Alert, App, Badge, Button, Card, Col, Descriptions, Drawer, Empty, Flex, Input, InputNumber, Modal, Row,
-  Space, Table, Tag, Tooltip, Typography,
+  Space, Table, Tabs, Tag, Tooltip, Typography,
 } from 'antd';
 import {
   CalculatorOutlined, CheckCircleFilled, CloseOutlined, ExclamationCircleFilled, FileAddOutlined, InfoCircleOutlined,
@@ -11,6 +11,7 @@ import dayjs from 'dayjs';
 import { api } from '../api/client';
 import useApi from '../hooks/useApi';
 import PageHeader from '../components/PageHeader';
+import { DecisionEvaluationPanel, PreviousDecisions } from '../components/DecisionReview';
 import { CURRENT_USER } from '../config';
 import { fmtDateTime, fmtNum } from '../utils';
 
@@ -237,6 +238,8 @@ function RecommendationDrawer({ rec, onClose, onDecided }) {
         <DailyDemandBars detail={d} />
       </Card>
 
+      <PreviousDecisions productId={rec.product_id} excludeRecommendationId={rec.recommendation_id} />
+
       <Typography.Title level={5}>관리자 판단</Typography.Title>
       {decided ? (
         <Alert
@@ -316,6 +319,7 @@ export default function Recommendations() {
   const [calculating, setCalculating] = useState(false);
   const [selectedKeys, setSelectedKeys] = useState([]);
   const [openId, setOpenId] = useState(null);
+  const [tab, setTab] = useState('list');
   const openRec = data.find((r) => r.recommendation_id === openId) ?? null;
 
   const calculate = async () => {
@@ -454,7 +458,7 @@ export default function Recommendations() {
     <>
       <PageHeader
         title="발주 추천"
-        description="최근 28일 확정 판매의 부트스트랩 분위수(P50/P70/P90)와 안전재고로 권장 발주량을 계산하고, 관리자 판단을 기록합니다."
+        description="최근 확정 판매(28일, 보호기간이 길면 그 2배)의 부트스트랩 분위수(P50/P70/P90)와 안전재고로 권장 발주량을 계산하고, 관리자 판단과 그 사후 평가를 기록합니다."
         extra={[
           <Button key="calc" icon={<CalculatorOutlined />} loading={calculating} onClick={calculate}>추천 계산 실행</Button>,
           <Button key="conv" type="primary" icon={<FileAddOutlined />} disabled={!selectedRecs.length} onClick={convert}>
@@ -463,72 +467,87 @@ export default function Recommendations() {
         ]}
       />
 
-      {calcResult && (calcResult.not_forecastable.length > 0 || calcResult.skipped.length > 0) && (
-        <Alert
-          type="info"
-          showIcon
-          closable
-          onClose={() => setCalcResult(null)}
-          style={{ marginBottom: 16 }}
-          message={`직전 계산(${fmtDateTime(calcResult.at)}): 추천 ${calcResult.created_count}건 저장, 예측 불가 ${calcResult.not_forecastable.length}건, 제외 ${calcResult.skipped.length}건`}
-          description={(
-            <Space direction="vertical" size={4}>
-              {calcResult.not_forecastable.map((x) => (
-                <div key={x.product_id}>
-                  <Tag color="error">예측 불가</Tag>{x.product_name} ({x.sku}) — {x.reason}. 안전재고 <b>{fmtNum(x.safety_stock_qty)}</b>, 현재고 {fmtNum(x.on_hand_qty)}
-                </div>
-              ))}
-              {calcResult.skipped.map((x) => (
-                <div key={x.product_id}><Tag>제외</Tag>{x.product_name} ({x.sku}) — {x.reason}</div>
-              ))}
-            </Space>
-          )}
-        />
-      )}
-
-      <Row gutter={16} style={{ marginBottom: 16 }}>
-        {[
-          ['판단 대기', counts.pending, '건'],
-          ['판단 확정 (전환 대기)', counts.confirmed, '건'],
-          ['실적 납기 적용', counts.actualLt, `/ ${data.length}건`],
-          ['이력 부족', counts.insufficient, `/ ${data.length}건`],
-        ].map(([label, v, suffix]) => (
-          <Col xs={12} lg={6} key={label}>
-            <Card size="small">
-              <Typography.Text type="secondary">{label}</Typography.Text>
-              <div style={{ fontSize: 24, fontWeight: 600 }}>{v} <span style={{ fontSize: 14, fontWeight: 400, color: '#6b7280' }}>{suffix}</span></div>
-            </Card>
-          </Col>
-        ))}
-      </Row>
-
-      <Card>
-        {!loading && data.length === 0 ? (
-          <Empty description="아직 계산된 추천이 없습니다. [추천 계산 실행]을 눌러주세요." />
-        ) : (
-          <Table
-            rowKey="recommendation_id"
-            columns={columns}
-            dataSource={data}
-            loading={loading}
-            size="middle"
-            bordered
-            pagination={false}
-            scroll={{ x: 'max-content' }}
-            rowClassName="clickable-row"
-            onRow={(r) => ({ onClick: () => setOpenId(r.recommendation_id) })}
-            rowSelection={{
-              selectedRowKeys: selectedKeys,
-              onChange: setSelectedKeys,
-              getCheckboxProps: (r) => ({ disabled: r.decision_status !== 'confirmed' || r.final_qty <= 0, onClick: (e) => e.stopPropagation() }),
-              columnTitle: <Tooltip title="판단 확정 건만 발주 전환 가능">전환</Tooltip>,
-            }}
-          />
-        )}
-        <Typography.Text type="secondary" style={{ display: 'block', marginTop: 12, fontSize: 12 }}>
-          상품별 최신 추천만 표시됩니다. 판단 확정 → 체크 → [선택 발주 전환] 순서로 진행하면 공급업체별 발주서(작성중)가 생성됩니다.
-        </Typography.Text>
-      </Card>
+      <Tabs
+        activeKey={tab}
+        onChange={setTab}
+        items={[
+          {
+            key: 'list',
+            label: '추천 목록',
+            children: (
+              <>
+              {calcResult && (calcResult.not_forecastable.length > 0 || calcResult.skipped.length > 0) && (
+                <Alert
+                  type="info"
+                  showIcon
+                  closable
+                  onClose={() => setCalcResult(null)}
+                  style={{ marginBottom: 16 }}
+                  message={`직전 계산(${fmtDateTime(calcResult.at)}): 추천 ${calcResult.created_count}건 저장, 예측 불가 ${calcResult.not_forecastable.length}건, 제외 ${calcResult.skipped.length}건`}
+                  description={(
+                    <Space direction="vertical" size={4}>
+                      {calcResult.not_forecastable.map((x) => (
+                        <div key={x.product_id}>
+                          <Tag color="error">예측 불가</Tag>{x.product_name} ({x.sku}) — {x.reason}. 안전재고 <b>{fmtNum(x.safety_stock_qty)}</b>, 현재고 {fmtNum(x.on_hand_qty)}
+                        </div>
+                      ))}
+                      {calcResult.skipped.map((x) => (
+                        <div key={x.product_id}><Tag>제외</Tag>{x.product_name} ({x.sku}) — {x.reason}</div>
+                      ))}
+                    </Space>
+                  )}
+                />
+              )}
+        
+              <Row gutter={16} style={{ marginBottom: 16 }}>
+                {[
+                  ['판단 대기', counts.pending, '건'],
+                  ['판단 확정 (전환 대기)', counts.confirmed, '건'],
+                  ['실적 납기 적용', counts.actualLt, `/ ${data.length}건`],
+                  ['이력 부족', counts.insufficient, `/ ${data.length}건`],
+                ].map(([label, v, suffix]) => (
+                  <Col xs={12} lg={6} key={label}>
+                    <Card size="small">
+                      <Typography.Text type="secondary">{label}</Typography.Text>
+                      <div style={{ fontSize: 24, fontWeight: 600 }}>{v} <span style={{ fontSize: 14, fontWeight: 400, color: '#6b7280' }}>{suffix}</span></div>
+                    </Card>
+                  </Col>
+                ))}
+              </Row>
+        
+              <Card>
+                {!loading && data.length === 0 ? (
+                  <Empty description="아직 계산된 추천이 없습니다. [추천 계산 실행]을 눌러주세요." />
+                ) : (
+                  <Table
+                    rowKey="recommendation_id"
+                    columns={columns}
+                    dataSource={data}
+                    loading={loading}
+                    size="middle"
+                    bordered
+                    pagination={false}
+                    scroll={{ x: 'max-content' }}
+                    rowClassName="clickable-row"
+                    onRow={(r) => ({ onClick: () => setOpenId(r.recommendation_id) })}
+                    rowSelection={{
+                      selectedRowKeys: selectedKeys,
+                      onChange: setSelectedKeys,
+                      getCheckboxProps: (r) => ({ disabled: r.decision_status !== 'confirmed' || r.final_qty <= 0, onClick: (e) => e.stopPropagation() }),
+                      columnTitle: <Tooltip title="판단 확정 건만 발주 전환 가능">전환</Tooltip>,
+                    }}
+                  />
+                )}
+                <Typography.Text type="secondary" style={{ display: 'block', marginTop: 12, fontSize: 12 }}>
+                  상품별 최신 추천만 표시됩니다. 판단 확정 → 체크 → [선택 발주 전환] 순서로 진행하면 공급업체별 발주서(작성중)가 생성됩니다.
+                </Typography.Text>
+              </Card>
+              </>
+            ),
+          },
+          { key: 'evaluation', label: '판단 사후 평가', children: <DecisionEvaluationPanel /> },
+        ]}
+      />
 
       {openRec && (
         <RecommendationDrawer

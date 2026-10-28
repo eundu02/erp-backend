@@ -122,15 +122,16 @@
 - **적용 납기**: 상품 공급업체의 확정 입고(`receipts.status='confirmed'`) 실적이 **3건 이상**이면 평균 실제 납기(`receipt_date − 연결된 purchase_orders.order_date`, 반올림)를 사용, 3건 미만이면 `planned_lead_time_days`로 폴백
   - 입고 1건 = 표본 1개(부분 입고도 각각 1건). 입고일이 발주일보다 빠른 비정상 표본은 평균에서 제외하고 건수만 기록
   - `calculation_detail.lead_time`: `{ source: 'actual_supplier_avg' | 'planned', applied_days, planned_days, supplier_id, actual_samples, actual_avg_days, actual_min_days, actual_max_days, excluded_samples, min_samples_required: 3, rounding: 'round' }`
-- 수요 분위수: 어제까지 최근 28일의 **확정 판매**(`sales.status='confirmed'`, `sale_date` 기준)를 일별 집계(판매 없는 날 0) → 보호기간 일수만큼 복원추출해 합산하는 부트스트랩 1000회 → 합계 분포의 P50/P70/P90 (선형 보간)
+- 수요 분위수: 어제까지 **max(28일, 보호기간 × 2)일**(상한 365일)의 **확정 판매**(`sales.status='confirmed'`, `sale_date` 기준)를 일별 집계(판매 없는 날 0) → 보호기간 일수만큼 복원추출해 합산하는 부트스트랩 1000회 → 합계 분포의 P50/P70/P90 (선형 보간)
   - 상품의 최초 확정 판매일이 기간 안이면 그날부터만 사용 (출시 전 날짜를 0으로 채우지 않음)
   - 사용 가능 일수 < max(보호기간 × 2, 14일)이면 계산은 하되 `calculation_detail.insufficient_history = true`
+  - 조회 기간을 이력 충분 기준과 같은 길이로 잡으므로, 판매 이력이 실제로 쌓여 있으면 보호기간이 긴 상품도 '이력 충분'이 된다. 부족 판정은 출시가 최근이라 이력이 짧은 경우에만 생긴다. 실제 조회 기간은 `calculation_detail.history_window`(`start`, `end`, `days`)에 기록
   - 기간 내 확정 판매가 0건이면 계산 생략 → 스냅샷 저장 없이 `not_forecastable`로 안전재고만 안내
 - 목표재고 = 수요 분위수 + `safety_stock_qty`, 권장 발주량 = max(0, 목표재고 − 재고 위치)
 - 권장량이 양수면 정수 올림 → `minimum_order_qty` 미만이면 최소 주문량 → `order_multiple`의 배수로 올림 (0이면 0 유지)
 - 제외: 공급업체 미지정 상품, 미사용 상품 (`skipped`)
 - `calculation_detail`(재현용): 집계 기간, 사용 가능·필요 일수, `insufficient_history`, 일별 수요 배열, 평균, 보호기간, 재고 위치, MOQ·배수, 부트스트랩 `{ iterations, seed, quantile_method }`, 전략별 `{ target_stock, raw_qty, after_moq, recommended_qty }`. 같은 일별 수요와 seed로 동일 결과 재현 가능
-- `model_name='rule_based'`, `model_version='v1-bootstrap28-lt'`
+- `model_name='rule_based'`, `model_version='v1.1-bootstrap-lt-window'` (이전 버전 `v1-bootstrap28-lt`는 조회 기간 28일 고정)
 
 ## 8. 관리자 판단 이력 (recommendation_decisions) ✅
 
@@ -138,6 +139,15 @@
 |---|---|---|
 | POST | /api/decisions | 추천에 대한 관리자 선택/수정 기록 (수정 시 사유 필수) |
 | POST | /api/decisions/convert-to-po | 여러 판단 이력을 공급업체별 발주서(draft)로 일괄 전환 |
+| GET | /api/decisions | 판단 이력(반려 제외)과 각 판단의 사후 평가, 최신순 (쿼리: `?product_id`, `?exclude_recommendation_id`, `?limit`). 추천 상세의 '이전 판단 이력'에 사용 |
+| GET | /api/decisions/evaluation | 사후 평가 요약 `{ summary, items }` (쿼리: `?product_id`) |
+
+**사후 평가** — 관리자가 추천과 다르게 판단한 경우, 시스템 추천과 관리자 수정 중 어느 쪽이 실제 수요에 더 가까웠는가
+- 보호기간 = 추천 계산일부터 `protection_period_days`일. 종료일이 오늘보다 앞서야 평가(`evaluation.status='evaluated'`), 아니면 `pending` + `days_until_evaluable`
+- 실제 수요 = 보호기간 동안의 확정 판매량. 사후 적정 발주량 Q* = max(0, ⌈실제 수요 + 안전재고 − 계산 당시 재고 위치⌉) (최소주문량·배수 미적용)
+- 시스템 오차 = |시스템 추천 수량 − Q*|, 관리자 오차 = |관리자 최종 수량 − Q*| → `closer`: `manager` | `system` | `tie` | `same`(수정 안 함)
+- 요약: 평가/대기 건수, 수정한 판단 중 관리자·시스템이 더 가까웠던 건수, 평균 절대 오차(수정한 판단 기준 시스템 vs 관리자, 전체)
+- 평가는 저장하지 않고 조회 시점에 계산한다 (테이블 구조 변경 없음, 이후 판매 취소도 반영)
 
 **POST /api/decisions 바디**: `recommendation_id, selected_strategy(P50|P70|P90|custom), decided_by, final_qty?, modification_reason?, decision_status?(confirmed 기본 | rejected)`
 - `system_recommended_qty` = 선택 전략의 추천수량 (결정 시점 값 고정). custom은 상품 기본 전략(`default_strategy`)의 추천수량을 기준으로 함

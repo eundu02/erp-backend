@@ -18,6 +18,7 @@ const SUITES = [
   ['기본 ERP (재고·판매·발주·입고)', 'e2e-erp.js'],
   ['발주 추천·관리자 판단·발주 전환', 'e2e-recommendation.js'],
   ['유지보수 기능 (트랜잭션·항목 비우기·작성중 전표 삭제)', 'e2e-maintenance.js'],
+  ['이력 조회 기간·이전 판단·사후 평가', 'e2e-decision-history.js'],
 ];
 
 if (TEST_DB === process.env.PGDATABASE) {

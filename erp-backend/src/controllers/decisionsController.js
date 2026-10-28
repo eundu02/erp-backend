@@ -4,6 +4,7 @@ const httpError = require('../utils/httpError');
 const { requirePositiveInt } = require('../utils/validate');
 const { nextIdAndNo } = require('../services/docNo');
 const { fetchPurchaseOrder } = require('./purchaseOrdersController');
+const { evaluateDecision, summarize } = require('../services/evaluation');
 
 const STRATEGIES = ['P50', 'P70', 'P90', 'custom'];
 const ACTIVE_STATUSES = ['pending', 'confirmed', 'converted_to_po']; // 같은 추천에 이 상태의 판단이 있으면 중복 등록 불가
@@ -178,4 +179,87 @@ async function convertToPo(req, res) {
   res.status(201).json({ purchase_orders: purchaseOrders });
 }
 
-module.exports = { create, convertToPo };
+// 판단 이력 + 사후 평가 입력값 조회.
+// 보호기간 = 추천 계산일부터 calculation_detail.protection_period_days일, 그 기간의 확정 판매량이 실제 수요.
+// 평가 결과는 저장하지 않고 조회 시점에 계산한다 (테이블 구조 변경 없이, 판매 취소 등 최신 상태 반영).
+async function loadDecisions(filters) {
+  const conditions = ["d.decision_status <> 'rejected'"];
+  const values = [];
+  if (filters.product_id !== undefined) {
+    values.push(filters.product_id);
+    conditions.push(`r.product_id = $${values.length}`);
+  }
+  if (filters.exclude_recommendation_id !== undefined) {
+    values.push(filters.exclude_recommendation_id);
+    conditions.push(`d.recommendation_id <> $${values.length}`);
+  }
+  values.push(filters.limit);
+
+  const { rows } = await pool.query(
+    `SELECT d.decision_id, d.recommendation_id, d.selected_strategy, d.system_recommended_qty, d.final_qty,
+            d.modification_reason, d.decision_status, d.purchase_order_id, d.decided_at,
+            r.product_id, p.sku, p.product_name, p.unit, r.calculated_at, r.safety_stock_qty_snapshot,
+            x.protection_days, x.inventory_position, x.start_date, x.end_date,
+            (x.end_date < CURRENT_DATE) AS evaluable,
+            GREATEST(x.end_date - CURRENT_DATE + 1, 0) AS days_until_evaluable,
+            COALESCE(a.qty, 0)::int AS actual_demand
+       FROM recommendation_decisions d
+       JOIN replenishment_recommendations r ON r.recommendation_id = d.recommendation_id
+       JOIN products p ON p.product_id = r.product_id
+       CROSS JOIN LATERAL (
+         SELECT (r.calculation_detail->>'protection_period_days')::int AS protection_days,
+                (r.calculation_detail->>'inventory_position')::int AS inventory_position,
+                r.calculated_at::date AS start_date,
+                r.calculated_at::date + (r.calculation_detail->>'protection_period_days')::int - 1 AS end_date
+       ) x
+       LEFT JOIN LATERAL (
+         SELECT SUM(si.quantity) AS qty
+           FROM sales s
+           JOIN sale_items si ON si.sale_id = s.sale_id
+          WHERE s.status = 'confirmed' AND si.product_id = r.product_id
+            AND s.sale_date BETWEEN x.start_date AND x.end_date
+       ) a ON true
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY d.decision_id DESC
+      LIMIT $${values.length}`,
+    values
+  );
+
+  return rows.map((r) => {
+    const { actual_demand: actualDemand, ...rest } = r;
+    return {
+      ...rest,
+      evaluation: evaluateDecision({
+        evaluable: r.evaluable,
+        actualDemand,
+        safetyStock: r.safety_stock_qty_snapshot,
+        inventoryPosition: r.inventory_position,
+        systemQty: r.system_recommended_qty,
+        finalQty: r.final_qty,
+      }),
+    };
+  });
+}
+
+function parseLimit(v, def) {
+  return Math.min(Math.max(parseInt(v, 10) || def, 1), 1000);
+}
+
+// GET /api/decisions  (?product_id, ?exclude_recommendation_id, ?limit)
+// 판단 이력(반려 제외)과 각 판단의 사후 평가. 추천 상세 화면의 '이전 판단' 표시에 사용한다.
+async function list(req, res) {
+  res.json(await loadDecisions({
+    product_id: req.query.product_id,
+    exclude_recommendation_id: req.query.exclude_recommendation_id,
+    limit: parseLimit(req.query.limit, 100),
+  }));
+}
+
+// GET /api/decisions/evaluation  (?product_id)
+// 사후 평가 요약: 관리자가 추천과 다르게 판단한 경우 시스템 추천과 관리자 수정 중 어느 쪽이 실제 수요에 더 가까웠는가.
+async function evaluation(req, res) {
+  const items = await loadDecisions({ product_id: req.query.product_id, limit: 1000 });
+  res.json({ summary: summarize(items), items });
+}
+
+module.exports = { create, convertToPo, list, evaluation };

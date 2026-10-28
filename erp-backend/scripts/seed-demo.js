@@ -10,7 +10,7 @@ const pool = require('../src/db/pool');
 
 const BASE = `http://localhost:${process.env.PORT || 4000}/api`;
 const USER = 1;
-const DAYS = 30;
+const DAYS = 60; // 판매 이력 일수 (보호기간이 긴 상품도 '보호기간 × 2' 조회 기간을 채우도록)
 
 async function call(method, path, body) {
   const res = await fetch(BASE + path, {
@@ -114,9 +114,9 @@ async function main() {
   console.log('3) 과거 발주·입고 이력으로 기초 재고 확보 (공급업체별 실제 납기 실적)');
   // [발주일(n일 전), 실제 납기(일)] — 식품 실적 3건(+시나리오 1건), 생활용품 2건(표본 부족 → 계획 납기 폴백), 사무용품 4건
   const history = {
-    food: [[50, 4], [38, 5], [26, 4]],
-    living: [[48, 9], [30, 10]],
-    office: [[56, 8], [42, 7], [28, 9], [14, 8]],
+    food: [[80, 4], [58, 5], [36, 4]],
+    living: [[76, 9], [44, 10]],
+    office: [[84, 8], [64, 7], [44, 9], [24, 8]],
   };
   const bySupplier = {};
   for (const c of catalog) {
@@ -170,12 +170,56 @@ async function main() {
     items: [{ product_id: P['FD-001'], quantity: 5, unit_price: 9900 }, { product_id: P['OF-001'], quantity: 2, unit_price: 27000 }],
   });
 
+  console.log('6) 과거 판단 이력 (사후 평가 시연용)');
+  // ※ 시연 전용: 오늘 데이터로 추천을 계산·판단한 뒤 계산일·판단일만 30일 전으로 되돌린다.
+  //   그 시점의 실제 재고·판매로 계산한 것이 아니므로, 이 판단들의 평가 결과를 실험 결과로 쓰면 안 된다.
+  //   (보호기간이 최대 22일이므로 30일 전 판단은 모두 평가 완료 상태가 된다)
+  const pastRecs = (await call('POST', '/recommendations/calculate', {})).created;
+  const recOf = Object.fromEntries(pastRecs.map((r) => [r.sku, r]));
+  const pastDecisions = [
+    ['FD-001', 'P70', 10, '주말 행사 대비 추가 확보'],
+    ['FD-002', 'P50', 0, null],
+    ['FD-003', 'P50', 0, null],
+    ['LV-002', 'P90', -12, '창고 공간 부족으로 감량'],
+    ['LV-003', 'P70', 20, '경쟁사 품절로 수요 증가 예상'],
+    ['OF-001', 'P70', 10, '신학기 사무용품 수요 증가 예상'],
+    ['OF-002', 'P50', -10, '거래처 재고 정리 예정으로 감량'],
+  ];
+  for (const [sku, strategy, delta, reason] of pastDecisions) {
+    const rec = recOf[sku];
+    const base = rec[`recommended_qty_${strategy.toLowerCase()}`];
+    await call('POST', '/decisions', {
+      recommendation_id: rec.recommendation_id,
+      selected_strategy: strategy,
+      final_qty: Math.max(0, base + delta),
+      modification_reason: reason ?? undefined,
+      decided_by: USER,
+    });
+  }
+  const pastIds = pastRecs.map((r) => r.recommendation_id);
+  await pool.query(
+    `UPDATE replenishment_recommendations SET calculated_at = calculated_at - interval '30 days'
+      WHERE recommendation_id = ANY($1::int[])`,
+    [pastIds]
+  );
+  await pool.query(
+    `UPDATE recommendation_decisions
+        SET decided_at = decided_at - interval '30 days', created_at = created_at - interval '30 days'
+      WHERE recommendation_id = ANY($1::int[])`,
+    [pastIds]
+  );
+
+  console.log('7) 오늘자 추천 계산');
+  await call('POST', '/recommendations/calculate', {});
+
   const inv = await call('GET', '/inventory');
   console.log('\n완료. 현재 재고:');
   console.table(inv.map((r) => ({
     SKU: r.sku, 상품명: r.product_name, 현재고: r.on_hand_qty, 안전재고: r.safety_stock_qty,
     미입고: r.outstanding_po_qty, 상태: r.below_safety_stock ? '미달' : '정상',
   })));
+  const ev = await call('GET', '/decisions/evaluation');
+  console.log('과거 판단 사후 평가 요약:', ev.summary);
 }
 
 main()
