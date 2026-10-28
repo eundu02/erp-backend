@@ -41,6 +41,16 @@ TRUNCATE app_users, suppliers, products, sales, sale_items, purchase_orders, pur
 
 화면은 `../erp-frontend` 참고.
 
+## 자동 검증
+
+```bash
+npm test
+```
+
+별도 테스트 DB(`erp_test`)를 새로 만들고 4001번 포트로 서버를 띄운 뒤 API 시나리오 3묶음(기본 ERP 51개, 발주 추천·판단 53개,
+유지보수 기능 21개 — 총 125개 항목)을 실행하고, 끝나면 서버를 끄고 테스트 DB를 삭제한다. `.env`의 운영·시연 DB는 건드리지 않는다.
+검증 스크립트는 `tests/`, 스키마 원본은 `sql/erp_schema.sql`.
+
 ## 빠른 동작 확인
 
 ```bash

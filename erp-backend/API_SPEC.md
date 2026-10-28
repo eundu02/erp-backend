@@ -32,6 +32,7 @@
 | DELETE | /api/suppliers/:id | 삭제 |
 
 **POST/PUT 바디**: `supplier_name, contact_name?, phone?, email?, address?, is_active?`
+- PUT은 바디에 있는 항목만 바꾼다. 선택 항목(담당자·연락처·이메일·주소)은 `null` 또는 빈 문자열로 비울 수 있고, `supplier_name`은 비울 수 없다(400).
 
 ---
 
@@ -63,6 +64,7 @@
 | GET | /api/sales/:id | 판매전표 단건 (상세 items 포함) |
 | POST | /api/sales | 판매전표(헤더+상세) 생성 (status=draft) |
 | POST | /api/sales/:id/confirm | 판매 확정 → inventory_balances 차감 + stock_movements(sale, 음수) 기록 (트랜잭션) |
+| DELETE | /api/sales/:id | 작성중(draft) 판매전표 삭제. 확정·취소된 전표는 409 (확정 전표는 취소 사용) |
 | POST | /api/sales/:id/cancel | 판매 취소 → confirmed였다면 반대 부호(+) 이력 추가로 재고 복원, draft면 상태만 변경 |
 
 **POST 바디**: `created_by, sale_no?, sale_date?(기본 오늘), items: [{ product_id, quantity, unit_price? }]`
@@ -79,6 +81,7 @@
 | GET | /api/purchase-orders/:id | 발주서 단건 (items에 `remaining_qty` 포함) |
 | POST | /api/purchase-orders | 발주서 생성 (status=draft) |
 | POST | /api/purchase-orders/:id/confirm | 발주 확정 (재고 변화 없음) |
+| DELETE | /api/purchase-orders/:id | 작성중 발주서 삭제. 발주 추천에서 전환된 발주서면 연결된 판단 이력을 `confirmed`로 되돌려 재전환 가능 |
 | POST | /api/purchase-orders/:id/cancel | 발주 취소 (draft/confirmed, 입고 전에만) |
 
 **POST 바디**: `supplier_id, created_by, po_no?, order_date?, expected_receipt_date?, items: [{ product_id, ordered_qty, unit_price?, recommendation_decision_id? }]`
@@ -94,6 +97,7 @@
 | GET | /api/receipts | 입고전표 목록 (쿼리: `?status=draft`, `?purchase_order_id=1`) |
 | GET | /api/receipts/:id | 입고전표 단건 (items 포함) |
 | POST | /api/receipts | 입고전표 생성 (부분 입고 지원) |
+| DELETE | /api/receipts/:id | 작성중 입고전표 삭제. 확정된 입고는 409 |
 | POST | /api/receipts/:id/confirm | 입고 확정 → inventory_balances 증가 + stock_movements(receipt, 양수) + po_items.received_qty 누적 + 발주 상태 갱신 (트랜잭션) |
 
 **POST 바디**: `purchase_order_id, receipt_no?, receipt_date?(기본 오늘), items: [{ po_item_id, received_qty }]`
