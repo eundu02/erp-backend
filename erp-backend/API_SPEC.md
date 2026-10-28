@@ -114,6 +114,17 @@
 | GET | /api/recommendations | 추천 스냅샷 목록, 최신순 (쿼리: `?product_id=1`, `?latest=true`(상품별 최신 1건), `?limit=100`(최대 1000)). 각 행에 최신 판단(`decision_id, selected_strategy, final_qty, decision_status, purchase_order_id`) 포함 |
 
 **calculate 바디(선택)**: `{ product_ids?: number[] }` — 생략 시 사용 중인 전 상품
+
+| Method | Path | 설명 |
+|---|---|---|
+| POST | /api/recommendations/backtest | 백테스트 (읽기 전용, 저장 안 함). 바디: `{ from?, to?, step_days?(기본 3), product_ids? }`, 기본 기준일 범위는 오늘 35일 전 ~ 8일 전 |
+
+**백테스트** — 과거 기준일 D마다 D 시점에 알 수 있었던 정보만으로 다시 계산해 실제와 비교
+- 수요: D 전날까지의 확정 판매(조회 기간 max(28일, 보호기간×2)). 적용 납기: D 이전에 확정된 입고 실적만(3건 이상이면 평균, 아니면 계획 납기). 시드는 상품·기준일로 고정해 재현 가능
+- 실제 수요 = D부터 보호기간 동안의 확정 판매량. 보호기간이 아직 끝나지 않은 기준일은 제외(`skipped.not_evaluable`)
+- 재고 위치는 과거 시점으로 복원할 수 없으므로 목표재고(예측 수요 + 안전재고) 기준으로 평가
+- 전략별 요약: 분위수 적중률(실제 ≤ 예측, 명목 50·70·90%와 비교), 목표재고 충족률(실제 ≤ 목표재고, 서비스 수준), 평균 부족량·과잉량, 수요 예측 평균 절대 오차
+- 응답: `{ params, summary: { p50, p70, p90 }, skipped, cases }`
 **응답**: `{ created: [추천 스냅샷], not_forecastable: [{ product_id, sku, status: '예측 불가', reason, safety_stock_qty, on_hand_qty, outstanding_po_qty }], skipped: [{ product_id, sku, reason }] }`
 
 **계산 규칙**

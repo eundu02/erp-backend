@@ -12,6 +12,7 @@ import { api } from '../api/client';
 import useApi from '../hooks/useApi';
 import PageHeader from '../components/PageHeader';
 import { DecisionEvaluationPanel, PreviousDecisions } from '../components/DecisionReview';
+import BacktestPanel from '../components/BacktestPanel';
 import { CURRENT_USER } from '../config';
 import { fmtDateTime, fmtNum } from '../utils';
 
@@ -546,6 +547,7 @@ export default function Recommendations() {
             ),
           },
           { key: 'evaluation', label: '판단 사후 평가', children: <DecisionEvaluationPanel /> },
+          { key: 'backtest', label: '백테스트', children: <BacktestPanel /> },
         ]}
       />
 

@@ -118,6 +118,24 @@ const calc = async (pid) => (await must('POST', '/recommendations/calculate', { 
     sm.mae_manager_on_modified === (20 + 0) / 2 && sm.mae_system_on_modified === (0 + eM.system_error) / 2, sm);
   check('상품 필터', (await must('GET', `/decisions/evaluation?product_id=${M}`)).summary.total === 1);
 
+  console.log('[백테스트: 기준일까지의 정보만 사용]');
+  const btA = await must('POST', '/recommendations/backtest', { from: ymd(25), to: ymd(13), step_days: 4, product_ids: [A] });
+  check('A: 기준일 4개 × 1상품 = 4사례 (보호기간 9일 모두 경과)', btA.cases.length === 4 && btA.params.dates === 4, btA.params);
+  check('A: 일정 수요 → 모든 분위수 = 45, 실제 45', btA.cases.every((c) => c.strategies.p50.demand === 45 && c.strategies.p90.demand === 45 && c.actual_demand === 45), btA.cases[0]);
+  check('A: 목표재고 충족 100%, 부족 0, 과잉 = 안전재고 10', btA.summary.p70.target_coverage_pct === 100 && btA.summary.p70.avg_shortage === 0 && btA.summary.p70.avg_excess === 10, btA.summary.p70);
+  const btM = await must('POST', '/recommendations/backtest', { from: ymd(20), to: ymd(20), product_ids: [M] });
+  const cM = btM.cases[0];
+  check('M: 급증 시작일 기준 → 과거 2개/일만 보고 예측(18), 실제 72 (미래 정보 미사용)', cM.strategies.p90.demand === 18 && cM.actual_demand === 72 && cM.strategies.p90.target_covered === false, cM);
+  check('M: 부족량 = 72 − (18 + 안전 5) = 49', cM.strategies.p90.shortage === 49, cM.strategies.p90);
+  const btNow = await must('POST', '/recommendations/backtest', { from: ymd(3), to: ymd(3), product_ids: [A] });
+  check('보호기간이 안 끝난 기준일은 제외', btNow.cases.length === 0 && btNow.skipped.not_evaluable === 1, btNow.skipped);
+  const btAgain = await must('POST', '/recommendations/backtest', { from: ymd(25), to: ymd(13), step_days: 4, product_ids: [A] });
+  check('같은 조건 재실행 → 같은 결과 (재현성)', JSON.stringify(btAgain.summary) === JSON.stringify(btA.summary));
+  check('잘못된 날짜 형식 400', (await call('POST', '/recommendations/backtest', { from: '2026/10/01' })).status === 400);
+  const recCount = (await db.query('SELECT COUNT(*)::int AS n FROM replenishment_recommendations')).rows[0].n;
+  await must('POST', '/recommendations/backtest', {});
+  check('백테스트는 추천을 저장하지 않음 (읽기 전용)', (await db.query('SELECT COUNT(*)::int AS n FROM replenishment_recommendations')).rows[0].n === recCount);
+
   await db.end();
   console.log(`\n결과: ${pass} 통과 / ${fail} 실패`);
   process.exit(fail ? 1 : 0);

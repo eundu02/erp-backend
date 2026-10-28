@@ -3,6 +3,7 @@ const pool = require('../db/pool');
 const withTransaction = require('../db/transaction');
 const httpError = require('../utils/httpError');
 const { BOOTSTRAP_ITERATIONS, bootstrapDemand, orderQuantity } = require('../services/forecast');
+const { backtestCase, summarizeBacktest, addDays: addBt } = require('../services/backtest');
 
 // 수요 집계 기간: 어제까지 max(28일, 보호기간 × 2)일 (오늘은 집계가 끝나지 않아 제외).
 // 이력 충분 기준(보호기간 × 2, 최소 14일)과 조회 기간을 일치시켜, 보호기간이 긴 상품도
@@ -300,4 +301,79 @@ async function list(req, res) {
   res.json(rows.map(normalize));
 }
 
-module.exports = { calculate, list };
+// POST /api/recommendations/backtest  { from?, to?, step_days?, product_ids? }
+// 과거 기준일마다 그 시점까지의 정보만으로 수요 분위수를 다시 계산해 실제 수요와 비교한다 (읽기 전용, 저장 안 함).
+// 기본: 오늘 35일 전 ~ 8일 전, 3일 간격.
+async function backtest(req, res) {
+  const { from, to, step_days: stepDays = 3, product_ids: productIds } = req.body ?? {};
+  const isDate = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
+  if ((from !== undefined && !isDate(from)) || (to !== undefined && !isDate(to))) {
+    throw httpError(400, 'from, to는 YYYY-MM-DD 형식이어야 합니다.');
+  }
+  if (!Number.isInteger(stepDays) || stepDays < 1 || stepDays > 90) throw httpError(400, 'step_days는 1~90 사이의 정수여야 합니다.');
+  if (productIds !== undefined && (!Array.isArray(productIds) || !productIds.every((v) => Number.isInteger(v) && v > 0))) {
+    throw httpError(400, 'product_ids는 1 이상의 정수로 된 배열이어야 합니다.');
+  }
+
+  const { rows: t } = await pool.query(`SELECT CURRENT_DATE::text AS today`);
+  const today = t[0].today;
+  const fromDate = from ?? addBt(today, -35);
+  const toDate = to ?? addBt(today, -8);
+  if (fromDate > toDate) throw httpError(400, 'from이 to보다 늦을 수 없습니다.');
+  const dates = [];
+  for (let d = fromDate; d <= toDate && dates.length < 200; d = addBt(d, stepDays)) dates.push(d);
+
+  const { rows: products } = await pool.query(
+    `SELECT product_id, sku, product_name, supplier_id, planned_lead_time_days, review_period_days, safety_stock_qty
+       FROM products
+      WHERE supplier_id IS NOT NULL AND ${productIds ? 'product_id = ANY($1::int[])' : 'is_active'}
+      ORDER BY product_id`,
+    productIds ? [productIds] : []
+  );
+  const ids = products.map((p) => p.product_id);
+  const { rows: sales } = await pool.query(
+    `SELECT si.product_id, s.sale_date, SUM(si.quantity)::int AS qty
+       FROM sales s JOIN sale_items si ON si.sale_id = s.sale_id
+      WHERE s.status = 'confirmed' AND si.product_id = ANY($1::int[])
+      GROUP BY si.product_id, s.sale_date`,
+    [ids]
+  );
+  const { rows: receipts } = await pool.query(
+    `SELECT o.supplier_id, r.receipt_date, (r.receipt_date - o.order_date) AS lead_days
+       FROM receipts r JOIN purchase_orders o ON o.purchase_order_id = r.purchase_order_id
+      WHERE r.status = 'confirmed' AND r.receipt_date >= o.order_date`
+  );
+
+  const daily = {};
+  const firstSale = {};
+  for (const r of sales) {
+    (daily[r.product_id] ??= {})[r.sale_date] = r.qty;
+    if (!firstSale[r.product_id] || r.sale_date < firstSale[r.product_id]) firstSale[r.product_id] = r.sale_date;
+  }
+  const rules = {
+    baseDays: BASE_HISTORY_DAYS, maxDays: MAX_HISTORY_DAYS, minRequired: MIN_REQUIRED_DAYS, minLeadSamples: MIN_LEAD_TIME_SAMPLES,
+  };
+
+  const cases = [];
+  const skipped = { not_evaluable: 0, no_history: 0 };
+  for (const asOf of dates) {
+    for (const p of products) {
+      // 기준일 이전에 확정된 입고만 납기 표본으로 사용 (미래 정보 차단)
+      const leadSamples = receipts
+        .filter((r) => r.supplier_id === p.supplier_id && r.receipt_date < asOf)
+        .map((r) => r.lead_days);
+      const c = backtestCase(p, asOf, daily[p.product_id] ?? {}, firstSale[p.product_id] ?? null, leadSamples, today, rules);
+      if (c.skip) skipped[c.skip] += 1;
+      else cases.push(c);
+    }
+  }
+
+  res.json({
+    params: { from: fromDate, to: toDate, step_days: stepDays, dates: dates.length, products: products.length },
+    summary: summarizeBacktest(cases),
+    skipped,
+    cases,
+  });
+}
+
+module.exports = { calculate, list, backtest };
